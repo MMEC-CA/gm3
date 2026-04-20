@@ -1,0 +1,9 @@
+{
+  "customizations": {
+    "codespaces": {
+      "repositories": {
+        "MMEC-CA/*": { "permissions": "read-all" }
+      }
+    }
+  }
+}
