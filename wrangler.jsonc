@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gm3",
+  "main": "./src/worker.js",
+  "compatibility_date": "2026-04-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./_site",
+    "binding": "ASSETS"
+  },
+  "routes": [
+    {
+      "pattern": "erd.mmec.ca/gm3/*",
+      "zone_name": "mmec.ca"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "SIGNALING_ROOM", "class_name": "SignalingRoom" }
+    ]
+  },
+  "observability": {
+    "enabled": true
+  }
+}
