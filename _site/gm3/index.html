@@ -1412,7 +1412,7 @@
         if (gp.y < -100 || gp.y > GH + 100) return;
         ctx.save(); ctx.globalAlpha = 0.25;
         ctx.translate(gp.x, gp.y);
-        ctx.rotate(car.angle - Math.PI / 2);
+        ctx.rotate(car.angle);
         ctx.fillStyle = '#555';
         ctx.fillRect(-CAR_W / 2, -CAR_H / 2, CAR_W, CAR_H);
         ctx.restore();
@@ -1424,7 +1424,7 @@
 
       ctx.save();
       ctx.translate(gp.x, gp.y);
-      ctx.rotate(car.angle - Math.PI / 2);
+      ctx.rotate(car.angle);
 
       var w = CAR_W, h = CAR_H;
       // Shadow
