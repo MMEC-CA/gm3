@@ -1,4 +1,5 @@
 {
+  "postStartCommand": "bash .devcontainer/clone-refs.sh",
   "customizations": {
     "codespaces": {
       "repositories": {
