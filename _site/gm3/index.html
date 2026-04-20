@@ -8,7 +8,7 @@
     //   Phase 2: Game (top-down racing, scrolling track, last car standing)
     // ============================================================
 
-    var BUILD = 'v2026-04-20-ab';
+    var BUILD = 'v2026-04-20-ac';
     var GW = 1920, GH = 1080;
 
     // ============================================================
@@ -98,12 +98,15 @@
     var trackKnots = [];  // [{y, cx}]
     var trackPrng = 1;
 
-    var keys = { l: false, r: false, flap: false, dn: false };
+    var bullets = [];
+    var keys = { l: false, r: false, flap: false, dn: false, gun: false };
     var flapEdge = false;
+    var gunEdge = false;
     var hasLocalPlayer2 = false;
     var localPlayer2PeerId = null;
     var localPlayer2SlotIndex = -1;
-    var keys2 = { l: false, r: false, flap: false, dn: false };
+    var keys2 = { l: false, r: false, flap: false, dn: false, gun: false };
+    var gunEdge2 = false;
     var p1Side = null;
     var flapEdge2 = false;
     var lastSentKeys = '';
@@ -288,10 +291,20 @@
       this.alive = true;
       this.eliminated = false;
       this.color = SLOT_COLORS[slotIndex % 12].hex;
+      this.gunCooldown = 0;
+      this.rotWobble = 0;
+      this.wobbleTimer = 0;
     }
 
     Car.prototype.update = function(dt, input) {
       if (this.eliminated) return;
+
+      // Wobble from being shot
+      if (this.wobbleTimer > 0) {
+        this.wobbleTimer = Math.max(0, this.wobbleTimer - dt);
+        var decay = this.wobbleTimer / 0.6;
+        this.angle += this.rotWobble * decay * dt;
+      }
 
       if (input) {
         // Turning: rate proportional to speed, minimum threshold
@@ -337,10 +350,6 @@
       this.x += this.vx * dt;
       this.y += this.vy * dt;
 
-      // Keep car in world X bounds with a soft wall
-      var margin = 60;
-      if (this.x < margin) { this.x = margin; this.vx = Math.max(0, this.vx); this.speed = Math.abs(this.speed) * 0.3; }
-      if (this.x > GW - margin) { this.x = GW - margin; this.vx = Math.min(0, this.vx); this.speed = Math.abs(this.speed) * 0.3; }
     };
 
     // ============================================================
@@ -368,6 +377,119 @@
       a.speed = a.vx * Math.sin(a.angle) + a.vy * Math.cos(a.angle);
       b.speed = b.vx * Math.sin(b.angle) + b.vy * Math.cos(b.angle);
       sndBounce();
+    }
+
+    // ============================================================
+    // WALL BOUNCE
+    // ============================================================
+    var WALL_BOUNCE = 0.55;
+    function bounceCarOffWalls(car) {
+      if (car.eliminated) return;
+      var wallR = TRACK_HW + TRACK_SHOULDER * 0.5;
+      var margin = CAR_W / 2;
+
+      // Sample tangent direction at car position
+      var dy10 = 20;
+      var cx0 = trackCxAtY(car.y - dy10);
+      var cx1 = trackCxAtY(car.y + dy10);
+      var tanX = cx1 - cx0, tanY = dy10 * 2;
+      var tanLen = Math.sqrt(tanX * tanX + tanY * tanY);
+      tanX /= tanLen; tanY /= tanLen;
+      // Wall normal points inward (toward center)
+      var normX = tanY, normY = -tanX; // normal = perp of tangent, pointing left; flip below per side
+
+      var tcx = trackCxAtY(car.y);
+      var leftWall = tcx - wallR;
+      var rightWall = tcx + wallR;
+
+      if (car.x - margin < leftWall) {
+        car.x = leftWall + margin;
+        // normal points right (+x): reflect velocity
+        var vn = car.vx * 1 + car.vy * 0; // dot with (1,0)
+        if (vn < 0) {
+          car.vx -= (1 + WALL_BOUNCE) * vn;
+          var spd = Math.sqrt(car.vx * car.vx + car.vy * car.vy) * 0.9;
+          car.angle = Math.atan2(car.vx, car.vy);
+          car.speed = spd;
+          sndBounce();
+        }
+      } else if (car.x + margin > rightWall) {
+        car.x = rightWall - margin;
+        // normal points left (-x): reflect velocity
+        var vn = car.vx * (-1) + car.vy * 0; // dot with (-1,0)
+        if (vn < 0) {
+          car.vx += (1 + WALL_BOUNCE) * vn;
+          var spd = Math.sqrt(car.vx * car.vx + car.vy * car.vy) * 0.9;
+          car.angle = Math.atan2(car.vx, car.vy);
+          car.speed = spd;
+          sndBounce();
+        }
+      }
+
+      // Hard world X limits
+      if (car.x < 20) { car.x = 20; if (car.vx < 0) { car.vx = -car.vx * WALL_BOUNCE; car.angle = Math.atan2(car.vx, car.vy); car.speed = Math.sqrt(car.vx*car.vx + car.vy*car.vy)*0.9; } }
+      if (car.x > GW - 20) { car.x = GW - 20; if (car.vx > 0) { car.vx = -car.vx * WALL_BOUNCE; car.angle = Math.atan2(car.vx, car.vy); car.speed = Math.sqrt(car.vx*car.vx + car.vy*car.vy)*0.9; } }
+    }
+
+    // ============================================================
+    // MACHINE GUNS & BULLETS
+    // ============================================================
+    var BULLET_SPEED = 1600;
+    var BULLET_LIFE = 1.2;
+    var GUN_COOLDOWN = 0.12;
+    var BULLET_R = 6;
+
+    function sndGunFire() {
+      if (!audioCtx) return;
+      playTone(880, 0.04, 0.15, 'square');
+      playTone(440, 0.05, 0.08, 'sawtooth');
+    }
+    function sndGunHit() {
+      if (!audioCtx) return;
+      playTone(200, 0.08, 0.25, 'square');
+      playTone(150, 0.15, 0.15, 'sawtooth');
+    }
+
+    function fireBullet(car) {
+      if (car.eliminated || car.gunCooldown > 0) return;
+      car.gunCooldown = GUN_COOLDOWN;
+      // Spawn bullet at car front
+      var frontX = car.x + Math.sin(car.angle) * (CAR_H / 2 + 8);
+      var frontY = car.y + Math.cos(car.angle) * (CAR_H / 2 + 8);
+      var bvx = Math.sin(car.angle) * BULLET_SPEED + car.vx * 0.3;
+      var bvy = Math.cos(car.angle) * BULLET_SPEED + car.vy * 0.3;
+      bullets.push({ x: frontX, y: frontY, vx: bvx, vy: bvy, ownerId: car.peerId, age: 0, alive: true });
+      if (car.peerId === myPeerId || car.peerId === localPlayer2PeerId) {
+        sndGunFire();
+        if (isHost) pendingSounds.push('gf');
+      }
+    }
+
+    function updateBullets(dt) {
+      for (var i = bullets.length - 1; i >= 0; i--) {
+        var b = bullets[i];
+        if (!b.alive) { bullets.splice(i, 1); continue; }
+        b.age += dt;
+        if (b.age > BULLET_LIFE) { bullets.splice(i, 1); continue; }
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+
+        // Hit detection (host only)
+        if (isHost) {
+          for (var j = 0; j < raceCars.length; j++) {
+            var car = raceCars[j];
+            if (car.eliminated || car.peerId === b.ownerId) continue;
+            var ddx = b.x - car.x, ddy = b.y - car.y;
+            if (ddx * ddx + ddy * ddy < (CAR_COLLISION_R + BULLET_R) * (CAR_COLLISION_R + BULLET_R)) {
+              b.alive = false;
+              car.rotWobble = (Math.random() < 0.5 ? 1 : -1) * (1.0 + Math.random() * 0.8) * Math.PI;
+              car.wobbleTimer = 0.6;
+              pendingSounds.push('gh');
+              break;
+            }
+          }
+        }
+      }
     }
 
     // ============================================================
@@ -455,13 +577,23 @@
         if (car.eliminated) continue;
         var inp = null;
         if (car.peerId === myPeerId) {
-          inp = { l:keys.l, r:keys.r, flap:keys.flap, dn:keys.dn };
+          inp = { l:keys.l, r:keys.r, flap:keys.flap, dn:keys.dn, gun:keys.gun };
         } else if (hasLocalPlayer2 && car.peerId === localPlayer2PeerId) {
-          inp = { l:keys2.l, r:keys2.r, flap:keys2.flap, dn:keys2.dn };
+          inp = { l:keys2.l, r:keys2.r, flap:keys2.flap, dn:keys2.dn, gun:keys2.gun };
         } else if (isHost && remoteInputs[car.peerId]) {
           inp = remoteInputs[car.peerId];
         }
+        // Cooldown tick
+        if (car.gunCooldown > 0) car.gunCooldown = Math.max(0, car.gunCooldown - dt);
         car.update(dt, inp);
+        // Wall bounce after position integration
+        bounceCarOffWalls(car);
+        // Gun fire (host fires bullets authoritatively; client fires local-player bullets)
+        if (inp && inp.gun && car.gunCooldown <= 0) {
+          if (isHost || car.peerId === myPeerId || car.peerId === localPlayer2PeerId) {
+            fireBullet(car);
+          }
+        }
       }
 
       // Car-car collisions (host only for authority)
@@ -474,6 +606,9 @@
           }
         }
       }
+
+      // Bullets
+      updateBullets(dt);
 
       // Camera
       updateCamera(dt);
@@ -495,8 +630,8 @@
         if (!fTexts[i].stat) { fTexts[i].life -= dt; if (fTexts[i].life <= 0) fTexts.splice(i, 1); }
       }
 
-      // Clear flapEdge
-      flapEdge = false; flapEdge2 = false;
+      // Clear flapEdge / gunEdge
+      flapEdge = false; flapEdge2 = false; gunEdge = false; gunEdge2 = false;
       for (var pid in remoteInputs) { if (remoteInputs[pid]) remoteInputs[pid].flapEdge = false; }
     }
 
@@ -521,14 +656,22 @@
           speed: Math.round(c.speed * 10) / 10,
           vx: Math.round(c.vx * 10) / 10,
           vy: Math.round(c.vy * 10) / 10,
-          eliminated: c.eliminated
+          eliminated: c.eliminated,
+          rotWobble: c.rotWobble,
+          wobbleTimer: Math.round(c.wobbleTimer * 100) / 100
         });
+      }
+      var bulletStates = [];
+      for (var i = 0; i < bullets.length; i++) {
+        var b = bullets[i];
+        if (b.alive) bulletStates.push({ x: Math.round(b.x), y: Math.round(b.y), vx: Math.round(b.vx), vy: Math.round(b.vy), age: Math.round(b.age * 100) / 100, ownerId: b.ownerId });
       }
       var sndList = pendingSounds.length > 0 ? pendingSounds.slice() : undefined;
       pendingSounds = [];
       broadcast({
         type: 'state', tick: gameTick,
         cars: carStates,
+        bullets: bulletStates.length > 0 ? bulletStates : undefined,
         gameTime: gameTime,
         camY: Math.round(camWorldY * 10) / 10,
         wave: wave,
@@ -549,8 +692,20 @@
           var s = msg.snd[si];
           if (s === 'b') { playTone(300, 0.12, 0.25, 'square'); setTimeout(function(){playTone(200,0.1,0.15);},60); }
           else if (s === 'k') { playTone(200,0.05,0.3); setTimeout(function(){playTone(120,0.3,0.2);},40); }
+          else if (s === 'gf') sndGunFire();
+          else if (s === 'gh') sndGunHit();
         }
       }
+
+      // Bullets: replace client bullet list with host's authoritative list
+      if (msg.bullets !== undefined) {
+        bullets = [];
+        for (var i = 0; i < msg.bullets.length; i++) {
+          var bs = msg.bullets[i];
+          bullets.push({ x: bs.x, y: bs.y, vx: bs.vx, vy: bs.vy, age: bs.age, ownerId: bs.ownerId, alive: true });
+        }
+      }
+
       if (!msg.cars) return;
 
       for (var i = 0; i < msg.cars.length; i++) {
@@ -571,6 +726,7 @@
         }
         car.angle = cs.angle;
         car.eliminated = cs.eliminated;
+        if (cs.wobbleTimer !== undefined) { car.rotWobble = cs.rotWobble; car.wobbleTimer = cs.wobbleTimer; }
       }
     }
 
@@ -745,7 +901,7 @@
         console.log('All peers disconnected — returning to lobby');
         lobbyState = 'lobby'; mySlotIndex = -1; cfg = null;
         for (var si = 0; si < 12; si++) { slots[si].peerId = null; slots[si].ready = false; slots[si].progress = 0; slots[si].holding = false; }
-        raceCars = []; fTexts = [];
+        raceCars = []; fTexts = []; bullets = [];
       }
     }
 
@@ -824,7 +980,7 @@
         if (lobbyState === 'observer') {
           lobbyState = 'lobby'; mySlotIndex = -1; cfg = null;
           for (var si = 0; si < 12; si++) { slots[si].peerId = null; slots[si].ready = false; slots[si].progress = 0; slots[si].holding = false; }
-          raceCars = []; fTexts = [];
+          raceCars = []; fTexts = []; bullets = [];
         } else if (lobbyState === 'game') {
           lobbyState = 'gameover';
           gameOverTime = performance.now() / 1000;
@@ -1054,7 +1210,7 @@
       isHost = (msg.hostPeerId === myPeerId);
       gameTime = 0; gameTick = 0; lastHostBroadcast = 0;
       wave = msg.level;
-      fTexts = []; playerScores = {};
+      fTexts = []; bullets = []; playerScores = {};
 
       initTrack(msg.level);
       cfg = { level: msg.level };
@@ -1097,18 +1253,18 @@
       if (isHost) return;
       inputSendTimer += 0.016;
       var hasChange = false;
-      var keyStr = JSON.stringify(keys) + (flapEdge ? '1' : '0');
+      var keyStr = JSON.stringify(keys) + (flapEdge ? '1' : '0') + (gunEdge ? 'g' : '');
       if (keyStr !== lastSentKeys) { lastSentKeys = keyStr; hasChange = true; }
       if (hasChange || inputSendTimer >= INPUT_SEND_INTERVAL) {
         inputSendTimer = 0; inputsSent++;
-        broadcast({ type:'input', peerId:myPeerId, keys:{ l:keys.l, r:keys.r, flap:keys.flap, dn:keys.dn }, flapEdge:flapEdge });
+        broadcast({ type:'input', peerId:myPeerId, keys:{ l:keys.l, r:keys.r, flap:keys.flap, dn:keys.dn, gun:keys.gun }, flapEdge:flapEdge });
       }
       if (hasLocalPlayer2) {
-        var keyStr2 = JSON.stringify(keys2) + (flapEdge2 ? '1' : '0');
+        var keyStr2 = JSON.stringify(keys2) + (flapEdge2 ? '1' : '0') + (gunEdge2 ? 'g' : '');
         var hasChange2 = keyStr2 !== lastSentKeys2;
         if (hasChange2) lastSentKeys2 = keyStr2;
         if (hasChange2 || inputSendTimer <= 0.001) {
-          broadcast({ type:'input', peerId:localPlayer2PeerId, keys:{ l:keys2.l, r:keys2.r, flap:keys2.flap, dn:keys2.dn }, flapEdge:flapEdge2 });
+          broadcast({ type:'input', peerId:localPlayer2PeerId, keys:{ l:keys2.l, r:keys2.r, flap:keys2.flap, dn:keys2.dn, gun:keys2.gun }, flapEdge:flapEdge2 });
         }
       }
     }
@@ -1267,6 +1423,24 @@
       // Cars (back to front: eliminated first, then active)
       for (var i = 0; i < raceCars.length; i++) { if (raceCars[i].eliminated) renderCar(raceCars[i]); }
       for (var i = 0; i < raceCars.length; i++) { if (!raceCars[i].eliminated) renderCar(raceCars[i]); }
+
+      // Bullets
+      for (var i = 0; i < bullets.length; i++) {
+        var b = bullets[i];
+        var gp = wToG(b.x, b.y);
+        if (gp.y < -20 || gp.y > GH + 20) continue;
+        var fade = Math.max(0, 1 - b.age / BULLET_LIFE);
+        ctx.globalAlpha = fade;
+        ctx.fillStyle = '#ff0';
+        ctx.beginPath(); ctx.arc(gp.x, gp.y, BULLET_R, 0, Math.PI * 2); ctx.fill();
+        // Tracer tail
+        var tailX = gp.x - Math.sin(Math.atan2(b.vx, b.vy)) * 18;
+        var tailY = gp.y + Math.cos(Math.atan2(b.vx, b.vy)) * 18;
+        ctx.strokeStyle = '#fa0';
+        ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(gp.x, gp.y); ctx.lineTo(tailX, tailY); ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
 
       // Danger / elimination indicators
       renderHazards();
@@ -1700,7 +1874,7 @@
         hasLocalPlayer2 = false; localPlayer2PeerId = null; localPlayer2SlotIndex = -1;
         p1Side = null;
         for (var si = 0; si < 12; si++) { slots[si].peerId = null; slots[si].ready = false; slots[si].progress = 0; slots[si].holding = false; }
-        raceCars = []; fTexts = [];
+        raceCars = []; fTexts = []; bullets = [];
         e.preventDefault(); return;
       }
       if (lobbyState === 'game') {
@@ -1713,8 +1887,8 @@
           }
           e.preventDefault(); return;
         }
-        var isWasd = (e.key === 'a' || e.key === 'A' || e.key === 'd' || e.key === 'D' || e.key === 'w' || e.key === 'W' || e.key === 's' || e.key === 'S');
-        var isArrow = (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === ' ');
+        var isWasd = (e.key === 'a' || e.key === 'A' || e.key === 'd' || e.key === 'D' || e.key === 'w' || e.key === 'W' || e.key === 's' || e.key === 'S' || e.key === 'q' || e.key === 'Q');
+        var isArrow = (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === ' ' || e.key === 'Enter');
         var isP2Key = hasLocalPlayer2 && ((isWasd && p1Side !== 'wasd') || (isArrow && p1Side === 'wasd'));
         var k = isP2Key ? keys2 : keys;
         if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') k.l = true;
@@ -1724,6 +1898,7 @@
           k.flap = true;
         }
         if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') k.dn = true;
+        if (e.key === 'Enter' || e.key === 'q' || e.key === 'Q') k.gun = true;
       }
       e.preventDefault();
     });
@@ -1739,14 +1914,15 @@
         }
       }
       if (lobbyState === 'game') {
-        var isWasd2 = (e.key === 'a' || e.key === 'A' || e.key === 'd' || e.key === 'D' || e.key === 'w' || e.key === 'W' || e.key === 's' || e.key === 'S');
-        var isArrow2 = (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === ' ');
+        var isWasd2 = (e.key === 'a' || e.key === 'A' || e.key === 'd' || e.key === 'D' || e.key === 'w' || e.key === 'W' || e.key === 's' || e.key === 'S' || e.key === 'q' || e.key === 'Q');
+        var isArrow2 = (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === ' ' || e.key === 'Enter');
         var isP2Up = hasLocalPlayer2 && ((isWasd2 && p1Side !== 'wasd') || (isArrow2 && p1Side === 'wasd'));
         var ku = isP2Up ? keys2 : keys;
         if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') ku.l = false;
         if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') ku.r = false;
         if (e.key === 'ArrowUp' || e.key === ' ' || e.key === 'w' || e.key === 'W') ku.flap = false;
         if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') ku.dn = false;
+        if (e.key === 'Enter' || e.key === 'q' || e.key === 'Q') ku.gun = false;
       }
     });
 
@@ -1768,7 +1944,7 @@
         if (performance.now() / 1000 - gameOverTime < GAME_OVER_LOCKOUT) return;
         lobbyState = 'lobby'; mySlotIndex = -1; cfg = null;
         for (var si = 0; si < 12; si++) { slots[si].peerId = null; slots[si].ready = false; slots[si].progress = 0; slots[si].holding = false; }
-        raceCars = []; fTexts = [];
+        raceCars = []; fTexts = []; bullets = [];
         return;
       }
       if (lobbyState === 'game') {
@@ -1863,7 +2039,7 @@
           console.log('Observer: no state for 5s — returning to lobby');
           lobbyState = 'lobby'; mySlotIndex = -1; cfg = null;
           for (var si = 0; si < 12; si++) { slots[si].peerId = null; slots[si].ready = false; slots[si].progress = 0; slots[si].holding = false; }
-          raceCars = []; fTexts = [];
+          raceCars = []; fTexts = []; bullets = [];
         }
         renderGame();
         var scO = Math.min(canvas.width / GW, canvas.height / GH);
